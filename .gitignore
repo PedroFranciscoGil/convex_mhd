@@ -1,0 +1,7 @@
+scratch/
+__pycache__/
+*.pyc
+.venv/
+*.h5
+*.nc
+wout_*.nc
