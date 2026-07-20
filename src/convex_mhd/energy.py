@@ -39,10 +39,13 @@ class EnergyModel:
     prescribed data held on the grid (assumptions A2-A3).
     """
 
-    def __init__(self, eq, grid, mu0=MU_0, pressure_sign=-1.0):
+    def __init__(self, eq, grid, mu0=MU_0, pressure_sign=-1.0,
+                 closure="prescribed_p", gamma=5.0 / 3.0):
         self.grid = grid
         self.mu0 = mu0
         self.pressure_sign = pressure_sign
+        self.closure = closure
+        self.gamma = gamma
 
         self._tR = Transform(grid, eq.R_basis, derivs=_DERIVS, build=True)
         self._tZ = Transform(grid, eq.Z_basis, derivs=_DERIVS, build=True)
@@ -60,6 +63,38 @@ class EnergyModel:
         self.p = jnp.asarray(eq.pressure(rho))
         # c(rho) = 1/2 psi'^2, carrying the 1/mu0 so W matches DESC's SI W_B.
         self.c = 0.5 * self.psi_r**2 / mu0
+
+        # flux-surface structure, for the adiabatic closure of Remark 1
+        sp = grid.spacing
+        ur, inv = np.unique(rho, return_inverse=True)
+        self.shell = jnp.asarray(np.eye(len(ur))[inv])          # node -> shell
+        self.w_ang = jnp.asarray(sp[:, 1] * sp[:, 2])           # dtheta dzeta
+        self.w_rad = jnp.asarray(np.array([sp[inv == i, 0][0] for i in range(len(ur))]))
+        self.p_shell = jnp.asarray(np.array(
+            [np.asarray(eq.pressure(rho))[inv == i][0] for i in range(len(ur))]))
+        self.mass = None                                        # set by calibrate
+
+    # -- adiabatic closure (Remark 1) --------------------------------------
+    def Vprime(self, a):
+        """V'(rho) = int det F dtheta dzeta, linear in J."""
+        return (self.w_ang * self.geometry(a)["J"]) @ self.shell
+
+    def calibrate_mass(self, a_ref):
+        """Set M(rho) so that p = M^gamma / V'^gamma at the reference state.
+
+        This makes the adiabatic term reproduce the prescribed pressure profile
+        exactly at a_ref, hence the same gradient there as -int p J.
+        """
+        self.mass = self.p_shell ** (1.0 / self.gamma) * self.Vprime(a_ref)
+        return self.mass
+
+    def W_thermal(self, a):
+        """(1/(gamma-1)) int M^gamma V'^(1-gamma) drho -- convex in V', >= 0."""
+        if self.mass is None:
+            raise RuntimeError("call calibrate_mass(a_ref) before using the adiabatic closure")
+        Vp = self.Vprime(a)
+        return jnp.sum(self.w_rad * self.mass**self.gamma
+                       * Vp ** (1.0 - self.gamma)) / (self.gamma - 1.0)
 
     # -- packing -----------------------------------------------------------
     def pack(self, R_lmn, Z_lmn, L_lmn):
@@ -103,6 +138,8 @@ class EnergyModel:
     def W_parts(self, a):
         g = self.geometry(a)
         W_B = jnp.sum(self.w * self.c * g["u2"] / g["J"])
+        if self.closure == "adiabatic":
+            return W_B, self.W_thermal(a)
         W_p = jnp.sum(self.w * self.p * g["J"])
         return W_B, self.pressure_sign * W_p
 
