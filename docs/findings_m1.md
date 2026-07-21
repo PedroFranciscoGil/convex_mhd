@@ -109,27 +109,38 @@ past the radius, so it is now a gated fallback behind CLARABEL.
 
 * **Fixed-point property: met.** Start at the DESC equilibrium -> zero drift,
   `<|F|>` preserved (even nudged to 5.3e-3), zero steps taken.
-* **Convergence from a perturbation: faithful but slow -- a conditioning
-  problem, not a closure one.** Both closures behave *identically* (`<|F|>`
-  4.1e4 -> ~7.2e3 over 60 steps, prescribed-p and adiabatic within 0.01%), which
-  rules the closure out as the blocker. Every ratio holds at 1.000, so the model
-  is faithful; the trouble is that each accepted step is tiny (`|z| ~ 0.0028`,
-  far *inside* the trust radius 0.05) and the stationarity measure crawls (0.108
-  -> 0.101 over 60 steps, ~7e-5 per step). The cause is the energy Hessian's
-  condition number ~2e5 (eigenvalues [1.07e4, 2.23e9]): the prox-linear step is
-  a regularized Newton step, and it barely moves along the soft, force-balance-
-  relevant directions while the stiff perspective-term directions dominate.
+* **Convergence from a perturbation: now works, after fixing the step control.**
+  The earlier crawl (`<|F|>` stuck at ~7e3, stationarity ~7e-5/step) was *not*
+  the preconditioner and *not* the closure -- both closures and both prox
+  metrics gave byte-identical steps. A mu/delta scan pinned it: the step was
+  throttled entirely by the prox weight `mu`, which was ~5 orders of magnitude
+  too large. `|z|` was invariant to the trust radius (0.0028 at delta =
+  0.02...2.0, never binding) but scaled as `1/mu`: at mu=1e-6 a *single* step
+  cut `<|F|>` from 7834 to 1029.
 
-This is precisely what Sec. 6.2's spectrally scaled prox metric `S` exists to
-fix ("playing the role of VMEC's preconditioner"). The current `S` only
-column-equilibrates the *determinant* operator `D`; it does not capture the full
-energy Hessian's anisotropy, which is what governs the outer convergence rate. A
-proper preconditioner -- the diagonal-of-Hessian or a low-rank Gauss-Newton
-approximation -- is the missing piece, and it is squarely Phase 3 work
-("diagonal preconditioning, matrix-free").
+  The proposal frames mu as the trust-region control; here that is backwards.
+  With the adiabatic closure and Ciarlet-Necas supplying boundedness, mu should
+  be a whisper of Tikhonov (~1e-6) and the hard radius `delta` is the real trust
+  region. Reconfigured that way, from the perturbed start: **W converges to DESC
+  to 2e-7** and `<|F|>` falls geometrically, 4.1e4 -> ~1.4e2 in 30 steps (a 300x
+  reduction), at a per-step rate ~0.88.
 
-M1's gate ("DESC's default force-residual tolerance in <= 30 outer iterations")
-is **not yet met**: the remaining gap is convergence *speed*, traced to the prox
-preconditioner, not correctness of the conic machinery, which now behaves
-exactly as the proposal advertises (faithful model, held boundary, held volume,
-positive Jacobian, true fixed point at the equilibrium).
+* **The Hessian prox metric is a solver speedup, not a step change.** Replacing
+  the determinant-column metric with `sqrt(diag energy Hessian)` (`precond=
+  "hessian"`) leaves the mathematical step identical but cuts wall-clock ~9x
+  (52s vs 463s for 15 steps), because the interior-point KKT system is far
+  better conditioned. Kept on by default.
+
+## Where M1 stands now
+
+Machinery: **correct and converging.** Faithful model (ratio 1.000), true fixed
+point at the equilibrium, boundary and volume held, `det F > 0` throughout, and
+geometric convergence to the DESC equilibrium (W to 2e-7).
+
+The one gap left to the formal gate is *rate*: ~0.88/step means ~100 outer
+iterations to DESC's 6.8e-3 force tolerance, against the gate's target of <= 30.
+The linear rate (not the quadratic one prox-linear can achieve) is the next
+thing to chase -- candidates: the alternating lambda block (block-coordinate
+descent is linearly convergent; folding lambda into the cone step would couple
+them), the first-order det F linearization, or residual mu damping. That is a
+convergence-acceleration task, with all the correctness pieces now in place.

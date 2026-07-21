@@ -45,10 +45,17 @@ class ProxLinearSolver:
         raw = np.linalg.norm(g)
         return float(np.hypot(np.linalg.norm(pR), np.linalg.norm(pZ)) / (raw + 1e-300))
 
-    def solve(self, a0, mu0=1.0, max_iter=30, tol=1e-8, eta=0.1,
+    def solve(self, a0, mu0=1e-6, max_iter=60, tol=1e-8, eta=0.05,
               mu_min=1e-4, mu_max=1e8, shrink=0.5, grow=4.0,
-              delta0=0.05, delta_max=0.2, eta_good=0.75,
+              delta0=0.3, delta_max=2.0, eta_good=0.5,
               max_rejects=8, verbose=True, track_force=False):
+        # mu is a whisper of Tikhonov regularization, NOT the step control:
+        # measured, the step scales as 1/mu, and at mu=0.1 the prox dominated
+        # the model and throttled convergence to a crawl (stationarity ~7e-5
+        # /step).  With mu ~ 1e-6 the trust-region radius delta becomes the real
+        # control and convergence turns geometric.  Boundedness (the original
+        # reason for mu > 0 under the -pJ sign) is now supplied by the adiabatic
+        # closure and the Ciarlet-Necas volume bound, so mu can be tiny.
         a = np.asarray(a0)
         J0 = np.asarray(self.m.geometry(a)["J"])
         if np.min(J0) <= 0:

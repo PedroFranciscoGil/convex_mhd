@@ -30,9 +30,34 @@ Three design decisions, none of them forced by the proposal:
 """
 
 import numpy as np
+import jax
+import jax.numpy as jnp
 import cvxpy as cp
 from desc.grid import LinearGrid
 from desc.transform import Transform
+
+
+def hessian_diag_rz(model, a_k, nRZ):
+    """diag of the energy Hessian over the (R,Z) block at a_k, via HVPs.
+
+    diag(H)_i = e_i . H e_i, one Hessian-vector product per coordinate,
+    batched with vmap.  This is the per-mode energy curvature that the prox
+    metric of Sec. 6.2 should match -- it captures the stiff magnetic-tension
+    directions that the determinant-operator column norms miss.
+    """
+    aL = jnp.asarray(np.asarray(a_k)[nRZ:])
+
+    def W_rz(x):
+        return model.W(jnp.concatenate([x, aL]))
+
+    x0 = jnp.asarray(np.asarray(a_k)[:nRZ])
+    grad = jax.grad(W_rz)
+
+    def hvp(v):
+        return jax.jvp(grad, (x0,), (v,))[1]
+
+    eye = jnp.eye(nRZ)
+    return np.asarray(jax.vmap(lambda e: e @ hvp(e))(eye))
 
 
 def boundary_matrix(eq, basis, n_extra=2, full_rank=True, tol=1e-10):
@@ -59,10 +84,15 @@ def boundary_matrix(eq, basis, n_extra=2, full_rank=True, tol=1e-10):
 class ConicSubproblem:
     """Builds and solves Eq. (14) about a given iterate."""
 
-    def __init__(self, model, ops, eq, kappa=0.2, volume=None):
+    def __init__(self, model, ops, eq, kappa=0.2, volume=None, precond="hessian"):
         self.m, self.ops, self.eq, self.kappa = model, ops, eq, kappa
         # Ciarlet-Necas bound: int det F <= vol(image).  See `solve`.
         self.volume = volume
+        # prox metric S^{1/2}: "hessian" = sqrt(diag energy Hessian) (Sec. 6.2,
+        # rebalances stiff vs soft directions -> fast convergence); "detF" =
+        # column norms of the determinant operator (the original, conditions
+        # only the Jacobian model and converges linearly/slowly).
+        self.precond = precond
         self.nRZ = model.nR + model.nZ
         self.AbR = boundary_matrix(eq, eq.R_basis)
         self.AbZ = boundary_matrix(eq, eq.Z_basis)
@@ -119,16 +149,25 @@ class ConicSubproblem:
         u_norm = np.sqrt(u2_k)                       # per node
         Dh = D / J_k[:, None]                        # d(L/J_k)/da
 
-        # The spectrally scaled prox metric ||.||_S of Sec. 6.2, realized as
-        # column equilibration of the determinant operator.  This is not
-        # cosmetic: cond(D) ~ 7e17, and ||Dh||_2 is set by a few very stiff
-        # directions (near-axis, high-order Zernike).  With S = I the step unit
-        # collapses in *every* direction to suit those few, leaving u
-        # numerically frozen (a_scale*U/|u| ~ 3e-5) and the solver stalling.
-        # Weighting each mode by how strongly it moves the Jacobian makes the
-        # trust region anisotropic and the KKT system well conditioned --
-        # exactly VMEC's diagonal preconditioner in convex clothing.
-        col = np.linalg.norm(Dh, axis=0)
+        # The spectrally scaled prox metric ||.||_S of Sec. 6.2, as a diagonal
+        # S^{1/2} = col.  Two choices:
+        #
+        #   "detF": column norms of the determinant operator.  Conditions only
+        #   the Jacobian model; ignores the magnetic-tension curvature, so the
+        #   outer loop converges LINEARLY (stationarity crawls ~7e-5/step) --
+        #   the effective step is a badly-preconditioned gradient step.
+        #
+        #   "hessian": sqrt(diag of the energy Hessian).  This is the curvature
+        #   that actually governs the step, so S^{-1/2} H S^{-1/2} is far better
+        #   conditioned and the prox-linear step behaves like a (damped) Newton
+        #   step.  cond(H) ~ 2e5 with entries spanning [1e4, 2e9]; the detF
+        #   metric leaves that anisotropy in place, the hessian metric removes
+        #   the diagonal part of it.
+        if self.precond == "hessian":
+            hdiag = hessian_diag_rz(m, a_k, self.nRZ)
+            col = np.sqrt(np.abs(hdiag))
+        else:
+            col = np.linalg.norm(Dh, axis=0)
         col = np.maximum(col, 1e-12 * col.max())     # S^{1/2}, diagonal
         Dh_s = Dh / col[None, :]
         U_s = U / col[None, None, :]
