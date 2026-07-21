@@ -131,6 +131,28 @@ past the radius, so it is now a gated fallback behind CLARABEL.
   (52s vs 463s for 15 steps), because the interior-point KKT system is far
   better conditioned. Kept on by default.
 
+## Cold-start robustness (the real test)
+
+Everything above started from the DESC answer plus a small perturbation. The
+proposal's actual claim is convergence from a *naive* guess. Tested with DESC's
+boundary-to-axis interpolation (`set_initial_guess()`), using **no knowledge of
+the solution** -- the Ciarlet-Necas volume is taken from the cold map's own
+`int det F`, which equals the boundary-enclosed volume for any bijection (the
+two agree to 1.00000, confirming it). Reproduce with `benchmarks/cold_start.py`.
+
+| case | cold `<F>` | -> final | W vs DESC | steps |
+|---|---|---|---|---|
+| SOLOVEV (axisym, analytic) | 1.10e4 | 1.0e1 | 6 digits | 15 |
+| DSHAPE (shaped finite-beta tokamak) | 3.51e4 | 7.1e2 | 7e-6 rel | 60 (capped) |
+
+Both converge to the DESC equilibrium energy from a cold start. The converged W
+matches DESC to ~6 digits even on the shaped tokamak, where the cold linear
+interpolation is far from the answer (`<F>` = 3.5e4). This is the robustness
+property the whole approach is for, and it holds. The force residual on DSHAPE
+is still descending at the iteration cap (711, geometric) -- W is already at the
+minimum while the gradient still has distance to run, which is the expected
+signature of a quadratic minimum.
+
 ## Where M1 stands now
 
 Machinery: **correct and converging.** Faithful model (ratio 1.000), true fixed
