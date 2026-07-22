@@ -153,6 +153,51 @@ is still descending at the iteration cap (711, geometric) -- W is already at the
 minimum while the gradient still has distance to run, which is the expected
 signature of a quadratic minimum.
 
+## The convergence rate: traced to mu, then to solver degeneracy
+
+The ~0.9 linear rate was chased down in three steps.
+
+1. **The alternating lambda block slows it, but is not the main cause.**
+   Freezing lambda at its correct value (perturb R,Z only from the equilibrium)
+   improves the effective rate from 0.87 to 0.73. Real, but secondary, and not
+   available from a cold start where lambda = 0.
+
+2. **mu was the throttle -- again.** With lambda frozen, shrinking the prox
+   weight sharply accelerates and turns the rate near-superlinear early:
+
+   | mu | eff. rate | steps | final `<F>` |
+   |---|---|---|---|
+   | 1e-6 | 0.62 | 25 | 13 |
+   | 1e-8 | 0.46 | 20 | 0.038 |
+   | 1e-10 | 0.42 | 18 | **0.012** |
+
+   At mu=1e-10 the residual reaches DESC's own tolerance (6.8e-3) in 18 steps,
+   and the first few steps drop the stationarity four orders of magnitude --
+   the near-Newton behaviour prox-linear should show, confirming the fixed prox
+   was the superlinear-killer.
+
+3. **But small mu exposes an interior-point degeneracy near the solution.** With
+   lambda alternation on (the real cold-start setting), a fixed small mu stalls:
+   as the step shrinks toward the solution the SOCP cones become exactly tight,
+   CLARABEL's KKT system goes degenerate and fails for *every* trust radius, and
+   SCS overshoots the radius (see below), so no solver delivers a step. mu=1e-6
+   actually reaches a lower residual than mu=1e-8 for this reason.
+
+   **Fix: adaptive mu.** Grow mu on any rejected/failed step (re-regularizing
+   the KKT system, rescuing CLARABEL) and let it decay on clean steps. This
+   pushed SOLOVEV from a stall at stationarity 1.3e-4 (step 8) down to 9e-6
+   (step 34), W matching DESC exactly. It still stalls eventually, at
+   stationarity ~9e-6 (`<F>` ~ 2), when the required step (~3e-6) is below what
+   the interior-point backend can resolve.
+
+**Conclusion on rate.** The residual barrier is not the algorithm -- ratios stay
+1.00, the model is faithful to the end -- but the interior-point *backend* at
+tiny steps. This is exactly the regime the proposal earmarks for Phase 3: a
+matrix-free first-order solver (PDHG/ADMM) with closed-form cone projections and
+primal-dual warm starts, which does not degenerate on tight cones and reuses the
+previous step's solution. Reaching DESC's force tolerance from a cold start on
+the shaped cases is expected to need that backend, not more outer iterations.
+
 ## Where M1 stands now
 
 Machinery: **correct and converging.** Faithful model (ratio 1.000), true fixed

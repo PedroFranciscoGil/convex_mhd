@@ -46,9 +46,9 @@ class ProxLinearSolver:
         return float(np.hypot(np.linalg.norm(pR), np.linalg.norm(pZ)) / (raw + 1e-300))
 
     def solve(self, a0, mu0=1e-6, max_iter=60, tol=1e-8, eta=0.05,
-              mu_min=1e-4, mu_max=1e8, shrink=0.5, grow=4.0,
+              mu_min=1e-9, mu_max=1e-2, shrink=0.5, grow=4.0,
               delta0=0.3, delta_max=2.0, eta_good=0.5,
-              max_rejects=8, verbose=True, track_force=False):
+              max_rejects=12, verbose=True, track_force=False):
         # mu is a whisper of Tikhonov regularization, NOT the step control:
         # measured, the step scales as 1/mu, and at mu=0.1 the prox dominated
         # the model and throttled convergence to a crawl (stationarity ~7e-5
@@ -87,32 +87,36 @@ class ProxLinearSolver:
                 break
 
             # --- step with trust-region ratio test on the TRUE energy ---
-            # The radius delta is the primary control (Sec. 6.5); mu is held
-            # fixed as a mild conditioner.  On a good ratio the radius grows, on
-            # a poor one it shrinks and the step is re-solved -- the standard
-            # trust-region loop, now with a real (hard) radius.
+            # delta is the primary control; mu is adapted alongside it.  mu wants
+            # to be small for fast (near-Newton) convergence, but too small makes
+            # the interior-point KKT system degenerate near the solution -- all
+            # cones become exactly tight, CLARABEL fails for every delta, and the
+            # loop stalls short of tolerance.  So on a rejected/failed step we
+            # GROW mu (re-regularizing the KKT system and rescuing the solver) as
+            # well as shrinking delta; on a clean step we let mu decay back down.
             accepted = False
             for _ in range(max_rejects):
                 try:
                     a_try, info = self.sub.solve(a, mu=mu, delta=delta)
-                except Exception as e:
-                    hist.append({"iter": k, "event": "solver_fail", "delta": delta, "err": str(e)[:80]})
+                except Exception:
                     delta *= shrink
+                    mu = min(mu * grow, mu_max)
                     continue
                 W_try = float(self.m.W(a_try))
                 pred = info["pred_decrease"]
                 if pred <= 0:                      # model predicts no progress
                     delta *= shrink
+                    mu = min(mu * grow, mu_max)
                     continue
                 ratio = (W - W_try) / pred
                 if ratio >= eta and np.isfinite(W_try):
                     a, W, accepted = a_try, W_try, True
-                    # grow the radius only when the model is very accurate AND
-                    # the step actually pushed against the boundary
+                    mu = max(mu * shrink, mu_min)
                     if ratio >= eta_good and info["rel_step"] > 0.9 * delta:
                         delta = min(delta * grow, delta_max)
                     break
                 delta *= shrink
+                mu = min(mu * grow, mu_max)
             if not accepted:
                 if verbose:
                     print(f"    stalled: no acceptable step at delta <= {delta:.2e}")
